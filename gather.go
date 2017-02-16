@@ -32,7 +32,7 @@ func init() {
 	      2002::/16             30     2
 	      2001::/32              5     5
 	      fc00::/7               3    13
-	      ::/96                  1     3
+	        ::/96                  1     3
 	      fec0::/10              1    11
 	      3ffe::/16              1    12
 	*/
@@ -71,17 +71,17 @@ type Addr struct {
 	Precedence int
 }
 
-type Addrs []Addr
+type addrlist []Addr
 
-func (s Addrs) Less(i, j int) bool {
+func (s addrlist) Less(i, j int) bool {
 	return s[i].Precedence > s[j].Precedence
 }
 
-func (s Addrs) Swap(i, j int) {
+func (s addrlist) Swap(i, j int) {
 	s[i], s[j] = s[j], s[i]
 }
 
-func (s Addrs) Len() int {
+func (s addrlist) Len() int {
 	return len(s)
 }
 
@@ -119,7 +119,7 @@ func (g defaultGatherer) Gather() ([]Addr, error) {
 	if err != nil {
 		return nil, err
 	}
-	addrs := make([]Addr, 0, 10)
+	addrs := make(addrlist, 0, 10)
 	for _, iface := range interfaces {
 		iAddrs, err := iface.Addrs()
 		if err != nil {
@@ -135,13 +135,18 @@ func (g defaultGatherer) Gather() ([]Addr, error) {
 				Precedence: g.precedence(ip),
 			}
 			if ip.IsLinkLocalUnicast() {
-				// Zone must be set for link-local addresses.
-				addr.Zone = iface.Name
+				// Skipping link-local addresses.
+				// addr.Zone = iface.Name
+				continue
+			}
+			if ip.IsLoopback() {
+				// Skipping local addresses.
+				continue
 			}
 			addrs = append(addrs, addr)
 		}
 	}
-	sort.Sort(Addrs(addrs))
+	sort.Sort(addrs)
 	return addrs, nil
 }
 

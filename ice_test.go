@@ -69,8 +69,15 @@ func TestParse(t *testing.T) {
 			},
 			Port:        56032,
 			Type:        CandidateHost,
-			NetworkCost: 50,
 			Attributes: Attributes{
+				Attribute{
+					Key:   []byte("generation"),
+					Value: []byte("0"),
+				},
+				Attribute{
+					Key:   []byte("network-cost"),
+					Value: []byte("50"),
+				},
 				Attribute{
 					Key:   []byte("alpha"),
 					Value: []byte("beta"),
@@ -109,7 +116,6 @@ func BenchmarkParse(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	b.ReportAllocs()
 	value := s[0].Value
 	p := candidateParser{
 		c: new(Candidate),
@@ -128,7 +134,6 @@ func BenchmarkParseIP(b *testing.B) {
 	var (
 		result = make([]byte, net.IPv4len)
 	)
-	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		result = parseIP(result, v)
 		result = result[:net.IPv4len]

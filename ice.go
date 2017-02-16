@@ -7,11 +7,9 @@ package ice
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net"
-	"unsafe"
-
-	"github.com/pkg/errors"
-	"github.com/valyala/fasthttp"
+	"strconv"
 )
 
 // AddressType is type for ConnectionAddress.
@@ -133,20 +131,14 @@ type Candidate struct {
 	ConnectionAddress ConnectionAddress
 	Port              int
 	Transport         TransportType
-	TransportValue    []byte
+	TransportValue    []byte // if failed to describe via TransportType
 	Foundation        int
 	ComponentID       int
 	Priority          int
 	Type              CandidateType
 	RelatedAddress    ConnectionAddress
 	RelatedPort       int
-
-	// Extended attributes
-	NetworkCost int
-	Generation  int
-
-	// Other attributes
-	Attributes Attributes
+	Attributes        Attributes
 }
 
 // reset sets all fields to zero values.
@@ -154,8 +146,6 @@ func (c *Candidate) reset() {
 	c.ConnectionAddress.reset()
 	c.RelatedAddress.reset()
 	c.RelatedPort = 0
-	c.NetworkCost = 0
-	c.Generation = 0
 	c.Transport = TransportUnknown
 	c.TransportValue = c.TransportValue[:0]
 	c.Attributes = c.Attributes[:0]
@@ -187,16 +177,9 @@ func (c Candidate) Equal(b *Candidate) bool {
 	if c.Type != b.Type {
 		return false
 	}
-	if c.NetworkCost != b.NetworkCost {
-		return false
-	}
-	if c.Generation != b.Generation {
-		return false
-	}
 	if !c.Attributes.Equal(b.Attributes) {
 		return false
 	}
-
 	return true
 }
 
@@ -282,18 +265,13 @@ const (
 )
 
 func parseInt(v []byte) (int, error) {
-	if len(v) > 1 && v[0] == '-' && v[1] != '-' {
-		// Integer is negative.
-		i, err := parseInt(v[1:])
-		return -i, err
-	}
-	return fasthttp.ParseUint(v)
+	return strconv.Atoi(string(v))
 }
 
 func (p *candidateParser) parseFoundation(v []byte) error {
 	i, err := parseInt(v)
 	if err != nil {
-		return errors.Wrap(err, "failed to parse foundation")
+		return &attrParseError{"foundation", err}
 	}
 	p.c.Foundation = i
 	return nil
@@ -302,7 +280,7 @@ func (p *candidateParser) parseFoundation(v []byte) error {
 func (p *candidateParser) parseComponentID(v []byte) error {
 	i, err := parseInt(v)
 	if err != nil {
-		return errors.Wrap(err, "failed to parse component ID")
+		return &attrParseError{"component id", err}
 	}
 	p.c.ComponentID = i
 	return nil
@@ -311,7 +289,7 @@ func (p *candidateParser) parseComponentID(v []byte) error {
 func (p *candidateParser) parsePriority(v []byte) error {
 	i, err := parseInt(v)
 	if err != nil {
-		return errors.Wrap(err, "failed to parse priority")
+		return &attrParseError{"priority", err}
 	}
 	p.c.Priority = i
 	return nil
@@ -320,7 +298,7 @@ func (p *candidateParser) parsePriority(v []byte) error {
 func (p *candidateParser) parsePort(v []byte) error {
 	i, err := parseInt(v)
 	if err != nil {
-		return errors.Wrap(err, "failed to parse port")
+		return attrParseError{"port", err}
 	}
 	p.c.Port = i
 	return nil
@@ -329,32 +307,14 @@ func (p *candidateParser) parsePort(v []byte) error {
 func (p *candidateParser) parseRelatedPort(v []byte) error {
 	i, err := parseInt(v)
 	if err != nil {
-		return errors.Wrap(err, "failed to parse port")
+		return attrParseError{"rel-port", err}
 	}
 	p.c.RelatedPort = i
 	return nil
 }
 
-// b2s converts byte slice to a string without memory allocation.
-//
-// Note it may break if string and/or slice header will change
-// in the future go versions.
-func b2s(b []byte) string {
-	return *(*string)(unsafe.Pointer(&b))
-}
-
 func parseIP(dst net.IP, v []byte) net.IP {
-	for _, c := range v {
-		if c == '.' {
-			var err error
-			dst, err = fasthttp.ParseIPv4(dst, v)
-			if err != nil {
-				return nil
-			}
-			return dst
-		}
-	}
-	ip := net.ParseIP(b2s(v))
+	ip := net.ParseIP(string(v))
 	for _, c := range ip {
 		dst = append(dst, c)
 	}
@@ -384,7 +344,7 @@ func (p *candidateParser) parseRelatedAddress(v []byte) error {
 }
 
 func (p *candidateParser) parseTransport(v []byte) error {
-	if bytes.Equal(v, []byte("udp")) || bytes.Equal(v, []byte("UDP")) {
+	if bytes.Equal([]byte("udp"), bytes.ToLower(v)) {
 		p.c.Transport = TransportUDP
 	} else {
 		p.c.Transport = TransportUnknown
@@ -395,8 +355,6 @@ func (p *candidateParser) parseTransport(v []byte) error {
 
 // possible attribute keys.
 const (
-	aGeneration     = "generation"
-	aNetworkCost    = "network-cost"
 	aType           = "typ"
 	aRelatedAddress = "raddr"
 	aRelatedPort    = "rport"
@@ -404,10 +362,6 @@ const (
 
 func (p *candidateParser) parseAttribute(a Attribute) error {
 	switch string(a.Key) {
-	case aGeneration:
-		return p.parseGeneration(a.Value)
-	case aNetworkCost:
-		return p.parseNetworkCost(a.Value)
 	case aType:
 		return p.parseType(a.Value)
 	case aRelatedAddress:
@@ -426,10 +380,28 @@ const (
 	minBufLen = 10
 )
 
+type ParseError struct {
+	Position int
+	Err      error
+}
+
+type attrParseError struct {
+	part  string
+	cause error
+}
+
+func (e attrParseError) Error() string {
+	return fmt.Sprintf("bad %s: %s", e.part, e.cause)
+}
+
+func (e ParseError) Error() string {
+	return fmt.Sprintf("parse error at %d byte: %s", e.Position, e.Err)
+}
+
 // parse populates internal Candidate from buffer.
 func (p *candidateParser) parse() error {
 	if len(p.buf) < minBufLen {
-		return errors.Errorf("buffer too small (%d < %d)", len(p.buf), minBufLen)
+		return io.ErrUnexpectedEOF
 	}
 	// special cases for raw value support:
 	if p.buf[0] == 'a' {
@@ -453,102 +425,86 @@ func (p *candidateParser) parse() error {
 	}
 	for i, c := range p.buf {
 		if pos > mandatoryElements-1 {
-			// saving offset
+			// Saving offset.
 			last = i
 			break
 		}
 		if c != sp {
-			// non-space character
+			// Non-space character.
 			l++
 			continue
 		}
-		// space character reached
+		// Space character reached.
 		if err := fns[pos](p.buf[i-l : i]); err != nil {
-			return errors.Wrapf(err, "failed to parse char %d, pos %d",
-				i, pos,
-			)
+			return &ParseError{
+				Position: i,
+				Err:      err,
+			}
 		}
 		pos++ // next element
 		l = 0 // reset length of element
 	}
 	if last == 0 {
-		// no non-mandatory elements
+		// No non-mandatory elements.
 		return nil
 	}
-	// offsets:
+	// Offsets:
 	var (
 		start  int // key start
 		end    int // key end
 		vStart int // value start
 	)
-	// subslicing to simplify offset calculation
+	// Subslicing to simplify offset calculation.
 	buf := p.buf[last-1:]
-	// saving every k:v pair ignoring spaces
+	// Saving every k:v pair ignoring spaces.
 	for i, c := range buf {
 		if c != sp && i != len(buf)-1 {
-			// char is non-space or end of buffer
+			// Char is non-space or end of buffer.
 			if start == 0 {
-				// key not started
+				// Key not started.
 				start = i
 				continue
 			}
 			if vStart == 0 && end != 0 {
-				// value not started and key ended
+				// value not started and key ended.
 				vStart = i
 			}
 			continue
 		}
-		// char is space or end of buf reached
+		// Char is space or end of buf reached.
 		if start == 0 {
-			// key not started, skipping
+			// Key not started, skipping.
 			continue
 		}
 		if end == 0 {
-			// key ended, saving offset
+			// Key ended, saving offset.
 			end = i
 			continue
 		}
 		if vStart == 0 {
-			// value not started, skipping
+			// Value not started, skipping.
 			continue
 		}
 		if i == len(buf)-1 && buf[len(buf)-1] != sp {
-			// fix for end of buf
+			// Fix for end of buf.
 			i = len(buf)
 		}
-		// value ended, saving attribute
+		// Value ended, saving attribute.
 		a := Attribute{
 			Key:   buf[start:end],
 			Value: buf[vStart:i],
 		}
 		if err := p.parseAttribute(a); err != nil {
-			return errors.Wrapf(err, "failed to parse attribute at char %d",
-				i+last,
-			)
+			return &ParseError{
+				Err:      err,
+				Position: i + last,
+			}
 		}
-		// reset offset
+		// Reset offset.
 		vStart = 0
 		end = 0
 		start = 0
 	}
-	return nil
-}
-
-func (p *candidateParser) parseNetworkCost(v []byte) error {
-	i, err := parseInt(v)
-	if err != nil {
-		return errors.Wrap(err, "failed to parse network cost")
-	}
-	p.c.NetworkCost = i
-	return nil
-}
-
-func (p *candidateParser) parseGeneration(v []byte) error {
-	i, err := parseInt(v)
-	if err != nil {
-		return errors.Wrap(err, "failed to parse generation")
-	}
-	p.c.Generation = i
 	return nil
 }
 
@@ -563,13 +519,13 @@ func (p *candidateParser) parseType(v []byte) error {
 	case candidateServerReflexive:
 		p.c.Type = CandidateServerReflexive
 	default:
-		return errors.Errorf("unknown candidate %q", v)
+		return fmt.Errorf("unknown candidate %q", v)
 	}
 	return nil
 }
 
-// ParseAttribute parses v into c and returns error if any.
-func ParseAttribute(v []byte, c *Candidate) error {
+// ParseCandidate parses v into c and returns error if any.
+func ParseCandidate(v []byte, c *Candidate) error {
 	p := candidateParser{
 		buf: v,
 		c:   c,
